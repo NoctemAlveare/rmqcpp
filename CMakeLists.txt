@@ -9,7 +9,8 @@ enable_testing()
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 add_subdirectory(src)
-add_subdirectory(examples)
+# Examples disabled - requires rmqintegration which is not available
+# add_subdirectory(examples)
 
 if("${CMAKE_CXX_COMPILER_ID}" STREQUAL "GNU")
     add_compile_options(-Wall -Wextra -Wpedantic)

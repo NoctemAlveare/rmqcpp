@@ -16,7 +16,7 @@ add_library(rmq STATIC
 
 target_link_libraries(rmq PUBLIC bsl bdl bal ZLIB::ZLIB OpenSSL::Crypto OpenSSL::SSL)
 if (ENABLE_COMPRESSION)
-    target_link_libraries(rmq PUBLIC zstd::libzstd_static)
+    target_link_libraries(rmq PUBLIC zstd::libzstd)
 endif()
 
 get_target_property(OPENSSL_TARGET_TYPE OpenSSL::SSL TYPE)

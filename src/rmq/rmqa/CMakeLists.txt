@@ -34,7 +34,7 @@ target_link_libraries(rmqa PUBLIC
     rmqamqpt
 )
 if (ENABLE_COMPRESSION)
-    target_link_libraries(rmqa PUBLIC zstd::libzstd_static)
+    target_link_libraries(rmqa PUBLIC zstd::libzstd)
     target_compile_definitions(rmqa PRIVATE RMQCPP_ENABLE_COMPRESSION)
 endif()
 if( "${CMAKE_CXX_COMPILER_ID}" STREQUAL "SunPro" )
@@ -49,4 +49,4 @@ endif()
 
 
 target_compile_definitions(rmqa PRIVATE USES_LIBRMQ_EXPERIMENTAL_FEATURES)
-target_include_directories(rmqa PUBLIC .)
+target_include_directories(rmqa PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
