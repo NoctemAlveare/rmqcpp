@@ -4,7 +4,11 @@ project(rmq LANGUAGES C CXX)
 option(ENABLE_COMPRESSION "Enable zstd compression support" ON)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS 1)
-enable_testing()
+
+# Only enable testing if BUILD_TESTING is ON (defaults to ON for standalone builds)
+if(BUILD_TESTING)
+    enable_testing()
+endif()
 
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
