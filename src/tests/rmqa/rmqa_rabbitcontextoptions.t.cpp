@@ -15,11 +15,56 @@
 
 #include <rmqa_rabbitcontextoptions.h>
 
+#include <rmqt_hosthealthconfig.h>
+
+#include <bsls_asserttest.h>
+#include <bsls_timeinterval.h>
+
+#include <bsl_optional.h>
+#include <bsl_variant.h>
+
+#include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
 using namespace BloombergLP;
 using namespace rmqa;
 using namespace ::testing;
+
+namespace {
+bool alwaysHealthy() { return true; }
+
+// gmock matchers over a RabbitContextOptions' host health selection, so
+// assertions read EXPECT_THAT(options, isOptOut()) / Not(isConfig()) etc. `arg`
+// is the matched RabbitContextOptions.
+
+/// Matches when the selection is an explicit opt-out.
+MATCHER(isOptOut, "holds an explicit host health opt-out")
+{
+    return bsl::holds_alternative<
+        rmqa::RabbitContextOptions::HostHealthAwarenessOff>(
+        arg.hostHealthSelection());
+}
+
+/// Matches when no host health preference is expressed (the default).
+MATCHER(isUnset, "expresses no host health preference")
+{
+    return bsl::holds_alternative<
+        rmqa::RabbitContextOptions::HostHealthAwarenessUnset>(
+        arg.hostHealthSelection());
+}
+
+/// Matches when a host health config is selected (opt-in).
+MATCHER(isConfig, "holds a host health config")
+{
+    return bsl::holds_alternative<rmqt::HostHealthConfig>(
+        arg.hostHealthSelection());
+}
+
+/// `bsls_asserttest`'s `BSLS_ASSERTTEST_ASSERT_{PASS,FAIL}` macros report their
+/// outcome by calling a driver-supplied `ASSERT(bool)` (which its header allows
+/// to be a function, not just a macro). Route that into a gtest expectation.
+void ASSERT(bool result) { EXPECT_TRUE(result); }
+} // namespace
 
 TEST(RabbitContextOptions, Constructs) { rmqa::RabbitContextOptions t; }
 TEST(RabbitContextOptions, Defaults)
@@ -27,5 +72,119 @@ TEST(RabbitContextOptions, Defaults)
     rmqa::RabbitContextOptions t;
     EXPECT_FALSE(t.metricPublisher());
     EXPECT_FALSE(t.threadpool());
+    EXPECT_THAT(t, Not(isConfig()));
+    // No host health selection is expressed by default: neither a config nor
+    // an explicit opt-out.
+    EXPECT_THAT(t, isUnset());
     t.errorCallback()("heres an error", -1);
+}
+
+TEST(RabbitContextOptions, SetHostHealthConfig)
+{
+    rmqa::RabbitContextOptions options;
+
+    // Initially not set
+    EXPECT_THAT(options, Not(isConfig()));
+
+    // Create a health checker function
+    rmqt::HostHealthConfig config(alwaysHealthy);
+
+    // Set host health config
+    options.setHostHealthConfig(config);
+
+    // Now it should be set
+    EXPECT_THAT(options, isConfig());
+}
+
+TEST(RabbitContextOptions, SetHostHealthSelectionOptOut)
+{
+    rmqa::RabbitContextOptions options;
+
+    // Initially no selection is expressed (distinct from an explicit opt-out).
+    EXPECT_THAT(options, Not(isConfig()));
+    EXPECT_THAT(options, isUnset());
+
+    // Explicit opt-out.
+    options.setHostHealthSelection(
+        RabbitContextOptions::HostHealthAwarenessOff());
+    EXPECT_THAT(options, isOptOut());
+    EXPECT_THAT(options, Not(isConfig()));
+}
+
+TEST(RabbitContextOptions, SetHostHealthSelectionConfig)
+{
+    rmqa::RabbitContextOptions options;
+
+    // Selecting a config via the variant setter is equivalent to
+    // setHostHealthConfig: the config is retrievable and it is not an opt-out.
+    options.setHostHealthSelection(rmqt::HostHealthConfig(alwaysHealthy));
+    EXPECT_THAT(options, isConfig());
+    EXPECT_THAT(options, Not(isOptOut()));
+}
+
+TEST(RabbitContextOptions, HostHealthSelectionIsMutuallyExclusive)
+{
+    // A config and an explicit opt-out are two alternatives of a single
+    // selection, so setting one replaces the other -- the contradictory
+    // "config attached AND opted out" state cannot be expressed.
+    rmqa::RabbitContextOptions options;
+
+    // Opt-out then attach a config: the config wins.
+    options.setHostHealthSelection(
+        RabbitContextOptions::HostHealthAwarenessOff());
+    options.setHostHealthConfig(rmqt::HostHealthConfig(alwaysHealthy));
+    EXPECT_THAT(options, isConfig());
+    EXPECT_THAT(options, Not(isOptOut()));
+
+    // Attach a config then opt out: the opt-out wins.
+    options.setHostHealthConfig(rmqt::HostHealthConfig(alwaysHealthy));
+    options.setHostHealthSelection(
+        RabbitContextOptions::HostHealthAwarenessOff());
+    EXPECT_THAT(options, isOptOut());
+    EXPECT_THAT(options, Not(isConfig()));
+}
+
+TEST(RabbitContextOptions, SetConnectionEstablishmentTimeoutAcceptsValid)
+{
+    rmqa::RabbitContextOptions options;
+    bsls::AssertTestHandlerGuard guard;
+
+    // Unset is allowed (falls back to the library default).
+    BSLS_ASSERTTEST_ASSERT_PASS(
+        options.setConnectionEstablishmentTimeout(bsl::nullopt));
+
+    // A whole-second positive value is allowed.
+    BSLS_ASSERTTEST_ASSERT_PASS(
+        options.setConnectionEstablishmentTimeout(bsls::TimeInterval(5, 0)));
+    EXPECT_EQ(options.connectionEstablishmentTimeout(),
+              bsls::TimeInterval(5, 0));
+
+    // A sub-second value must be accepted (500ms), as must the 1ms granularity
+    // floor the hung timer supports.
+    BSLS_ASSERTTEST_ASSERT_PASS(options.setConnectionEstablishmentTimeout(
+        bsls::TimeInterval(0, 500 * 1000 * 1000)));
+    EXPECT_EQ(options.connectionEstablishmentTimeout(),
+              bsls::TimeInterval(0, 500 * 1000 * 1000));
+
+    BSLS_ASSERTTEST_ASSERT_PASS(options.setConnectionEstablishmentTimeout(
+        bsls::TimeInterval(0, 1000 * 1000))); // exactly 1ms
+}
+
+TEST(RabbitContextOptions, SetConnectionEstablishmentTimeoutRejectsTooSmall)
+{
+    rmqa::RabbitContextOptions options;
+    bsls::AssertTestHandlerGuard guard;
+
+    // Zero would expire the establishment bound immediately.
+    BSLS_ASSERTTEST_ASSERT_FAIL(
+        options.setConnectionEstablishmentTimeout(bsls::TimeInterval(0, 0)));
+
+    // Negative is likewise invalid.
+    BSLS_ASSERTTEST_ASSERT_FAIL(
+        options.setConnectionEstablishmentTimeout(bsls::TimeInterval(-1, 0)));
+
+    // A positive but sub-millisecond interval (500us) rounds down to 0ms in the
+    // hung timer, so it is rejected too.
+    BSLS_ASSERTTEST_ASSERT_FAIL(options.setConnectionEstablishmentTimeout(
+        bsls::TimeInterval(0, 500 * 1000)));
 }

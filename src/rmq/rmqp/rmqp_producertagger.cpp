@@ -13,32 +13,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include <rmqt_vhostinfo.h>
-
-#include <rmqt_credentials.h>
-#include <rmqt_endpoint.h>
+#include <rmqp_producertagger.h>
 
 namespace BloombergLP {
-namespace rmqt {
+namespace rmqp {
 
-VHostInfo::VHostInfo(const bsl::shared_ptr<rmqt::Endpoint> endpoint,
-                     const bsl::shared_ptr<rmqt::Credentials> credentials)
-: d_endpoint(endpoint)
-, d_credentials(credentials)
-{
-}
+ProducerTagger::~ProducerTagger() {}
 
-VHostInfo::~VHostInfo() {}
-
-bsl::shared_ptr<rmqt::Endpoint> VHostInfo::endpoint() const
-{
-    return d_endpoint;
-}
-
-bsl::shared_ptr<rmqt::Credentials> VHostInfo::credentials() const
-{
-    return d_credentials;
-}
-
-} // namespace rmqt
+} // namespace rmqp
 } // namespace BloombergLP

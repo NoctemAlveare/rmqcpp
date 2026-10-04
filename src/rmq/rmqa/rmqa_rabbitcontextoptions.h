@@ -22,12 +22,15 @@
 #include <rmqp_consumertracing.h>
 #include <rmqp_producertracing.h>
 #include <rmqt_fieldvalue.h>
+#include <rmqt_hosthealthconfig.h>
 #include <rmqt_properties.h>
 #include <rmqt_result.h>
 
 #include <bdlmt_threadpool.h>
 #include <bsl_memory.h>
+#include <bsl_optional.h>
 #include <bsl_set.h>
+#include <bsl_variant.h>
 #include <bsls_timeinterval.h>
 
 namespace BloombergLP {
@@ -42,6 +45,30 @@ namespace rmqa {
 class RabbitContextOptions {
   public:
     typedef bsl::set<bsl::string> Tunables;
+
+    /// \brief Tag type expressing no host health preference: it neither opts in
+    /// nor opts out, leaving the choice to enclosing configuration layers. This
+    /// is the alternative held by a default-constructed \c HostHealthSelection
+    /// (the default). See \c setHostHealthSelection.
+    struct HostHealthAwarenessUnset {};
+
+    /// \brief Tag type selecting an explicit opt-out from host health
+    /// awareness; see \c setHostHealthSelection. Selecting it is distinct from
+    /// leaving the host health selection unset (\c HostHealthAwarenessUnset),
+    /// which expresses no preference and lets enclosing configuration layers
+    /// apply their own policy.
+    struct HostHealthAwarenessOff {};
+
+    /// \brief A caller's host health selection: exactly one of three mutually
+    /// exclusive alternatives -- \c HostHealthAwarenessUnset (no preference;
+    /// the default), \c rmqt::HostHealthConfig (opt-in; monitoring runs), or
+    /// \c HostHealthAwarenessOff (explicit opt-out). A default-constructed
+    /// selection holds \c HostHealthAwarenessUnset. See
+    /// \c setHostHealthSelection.
+    typedef bsl::variant<HostHealthAwarenessUnset,
+                         rmqt::HostHealthConfig,
+                         HostHealthAwarenessOff>
+        HostHealthSelection;
 
     /// \brief By Default RabbitContext will
     /// 1) Create it's own threadpool for
@@ -81,9 +108,15 @@ class RabbitContextOptions {
     /// \param name name of client property to set
     /// \param value value of client property
     /// NOTE: The following properties are set by default and can be
-    /// overridden: task, pid, os, os_version, os_patch. The following
-    /// properties are reserved and cannot be overridden: capabilities,
-    /// platform, product, version, connection_name
+    /// overridden: task, pid, os, os_version, os_patch, product, version.
+    /// If product and version are provided, "product_chain" and
+    /// "version_chain" fields are automatically populated showing the
+    /// full library stack (e.g. product_chain="my-wrapper | rmqcpp C++ Client
+    /// Library", version_chain="1.0.0 | 2.33.0").
+    /// The following properties are reserved: capabilities, platform,
+    /// connection_name. The product_chain and version_chain fields are
+    /// automatically managed by the library stack and should not be set
+    /// directly by applications.
     RabbitContextOptions& setClientProperty(const bsl::string& name,
                                             const rmqt::FieldValue& value);
 
@@ -104,6 +137,27 @@ class RabbitContextOptions {
     /// broker
     /// \param timeout the timeout value
     RabbitContextOptions& setConnectionErrorThreshold(
+        const bsl::optional<bsls::TimeInterval>& timeout);
+
+    /// \brief Set the maximum time a single connection-establishment attempt
+    /// (TCP connect + TLS handshake + AMQP handshake) may take before it is
+    /// aborted and retried. The library already bounds establishment with a
+    /// default; this makes that bound configurable.
+    /// \param timeout the establishment timeout, as a `bsls::TimeInterval` so
+    /// that any resolution (down to nanoseconds) can be expressed -- e.g.
+    /// `bsls::TimeInterval(5.0)` for five seconds, or
+    /// `bsls::TimeInterval(0, 500 * 1000 * 1000)` for 500 milliseconds. If not
+    /// set (`bsl::nullopt`), the library default is used. This only ever
+    /// applies to the establishment phase -- it is cancelled once a connection
+    /// is established -- so it does not affect long-lived connections. Lowering
+    /// it makes the client give up on a stalled attempt and retry sooner;
+    /// raising it tolerates slower networks/handshakes.
+    /// \note The timeout is applied at millisecond granularity: the behavior
+    /// is undefined unless `timeout`, when set, is at least one millisecond. A
+    /// smaller (sub-millisecond) interval rounds down to zero, which would
+    /// expire the bound immediately and prevent any connection from
+    /// establishing.
+    RabbitContextOptions& setConnectionEstablishmentTimeout(
         const bsl::optional<bsls::TimeInterval>& timeout);
 
     /// \brief will be called back to create a context which spans for the
@@ -135,6 +189,39 @@ class RabbitContextOptions {
     RabbitContextOptions&
     setShuffleConnectionEndpoints(bool shuffleConnectionEndpoints);
 
+    /// \brief Set host health config for connections created by this context to
+    /// ensure that RabbitMQ consumers are connected from healthy hosts.
+    /// When host health config is set, the host health monitor is created and
+    /// consumers with \c consumeOnlyFromHealthyHost enabled (the default) will
+    /// pause message delivery when the host becomes unhealthy and resume when
+    /// the host is deemed healthy again.
+    /// \note By default, \c ConsumerConfig::consumeOnlyFromHealthyHost is true,
+    /// meaning consumers automatically participate in host health monitoring
+    /// when host health config is set at the context level. Consumers can
+    /// opt out by calling \c
+    /// ConsumerConfig::setConsumeOnlyFromHealthyHost(false). If host health
+    /// config is not set, \c consumeOnlyFromHealthyHost has no effect.
+    ///
+    /// \param hostHealthConfig configuration for host health monitoring
+    ///
+    /// \note This is a convenience equivalent to \c setHostHealthSelection with
+    /// a \c HostHealthConfig: selecting a config is what causes the monitor to
+    /// run, and it replaces any prior opt-out selection. Leaving the selection
+    /// unset (the default) expresses no preference.
+    RabbitContextOptions&
+    setHostHealthConfig(const rmqt::HostHealthConfig& hostHealthConfig);
+
+    /// \brief Set the caller's host health selection: a \c HostHealthConfig to
+    /// opt in (monitoring runs) or \c HostHealthAwarenessOff to explicitly
+    /// opt out (no monitor is created even if a config could otherwise be
+    /// attached). The alternatives are mutually exclusive -- this replaces any
+    /// previously set config or opt-out. Not calling this at all leaves the
+    /// selection unset (the default), which expresses no preference and lets
+    /// enclosing configuration layers apply their own policy.
+    /// \param selection the host health selection
+    RabbitContextOptions&
+    setHostHealthSelection(const HostHealthSelection& selection);
+
     bdlmt::ThreadPool* threadpool() const { return d_threadpool; }
 
     const bsl::shared_ptr<rmqp::MetricPublisher>& metricPublisher() const
@@ -159,6 +246,12 @@ class RabbitContextOptions {
         return d_connectionErrorThreshold;
     }
 
+    const bsl::optional<bsls::TimeInterval>&
+    connectionEstablishmentTimeout() const
+    {
+        return d_connectionEstablishmentTimeout;
+    }
+
     const rmqt::Tunables& tunables() const { return d_tunables; }
 
     const bsl::shared_ptr<rmqp::ConsumerTracing>& consumerTracing() const
@@ -176,21 +269,37 @@ class RabbitContextOptions {
         return d_shuffleConnectionEndpoints;
     }
 
+    /// \brief Get the caller's host health selection. The returned variant
+    /// holds \c HostHealthAwarenessUnset when no preference has been expressed
+    /// (the default), a \c rmqt::HostHealthConfig when opted in (via
+    /// \c setHostHealthSelection or \c setHostHealthConfig), or a
+    /// \c HostHealthAwarenessOff when explicitly opted out.
+    /// \return The host health selection
+    const HostHealthSelection& hostHealthSelection() const
+    {
+        return d_hostHealthSelection;
+    }
+
 #ifdef USES_LIBRMQ_EXPERIMENTAL_FEATURES
     RabbitContextOptions& setTunable(const bsl::string& tunable);
 #endif
 
   private:
+    // Members are ordered to minimize padding (see
+    // clang-analyzer-optin.performance.Padding), not by logical grouping. The
+    // constructor's initializer list mirrors this order to avoid -Wreorder.
     static const int DEFAULT_MESSAGE_PROCESSING_TIMEOUT = 60;
-    bdlmt::ThreadPool* d_threadpool;
     rmqt::ErrorCallback d_onError;
+    HostHealthSelection d_hostHealthSelection;
+    bdlmt::ThreadPool* d_threadpool;
     bsl::shared_ptr<rmqp::MetricPublisher> d_metricPublisher;
-    rmqt::FieldTable d_clientProperties;
     bsls::TimeInterval d_messageProcessingTimeout;
-    rmqt::Tunables d_tunables;
-    bsl::optional<bsls::TimeInterval> d_connectionErrorThreshold;
     bsl::shared_ptr<rmqp::ConsumerTracing> d_consumerTracing;
     bsl::shared_ptr<rmqp::ProducerTracing> d_producerTracing;
+    bsl::optional<bsls::TimeInterval> d_connectionErrorThreshold;
+    bsl::optional<bsls::TimeInterval> d_connectionEstablishmentTimeout;
+    rmqt::FieldTable d_clientProperties;
+    rmqt::Tunables d_tunables;
     bsl::optional<bool> d_shuffleConnectionEndpoints;
 };
 

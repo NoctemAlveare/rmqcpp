@@ -17,7 +17,7 @@
 
 #include <rmqp_producertracing.h>
 
-#include <rmqa_tracingproducerimpl.h>
+#include <rmqa_tracingtagger.h>
 
 #include <rmqtestutil_mockchannel.t.h>
 #include <rmqtestutil_mockeventloop.t.h>
@@ -86,6 +86,25 @@ class MockConfirmCallback : public ConfirmCallback {
                       const bsl::string&,
                       const rmqt::ConfirmResponse& confirmResponse));
 };
+
+const char k_INJECTED_KEY[]   = "injected-header";
+const char k_INJECTED_VALUE[] = "injected-value";
+
+/// Stands in for a tracing implementation which injects a header in place, as
+/// the real hooks do.
+bsl::shared_ptr<rmqp::ProducerTracing::Context>
+tagWithHeader(rmqt::Properties* properties,
+              const bsl::string&,
+              const bsl::string&,
+              const bsl::shared_ptr<const rmqt::Endpoint>&)
+{
+    if (!properties->headers) {
+        properties->headers = bsl::make_shared<rmqt::FieldTable>();
+    }
+    (*properties->headers)[k_INJECTED_KEY] = bsl::string(k_INJECTED_VALUE);
+
+    return bsl::make_shared<MockProducerTracing::MockContext>();
+}
 
 MATCHER_P(ExchangeHandleNameEq, expected, "")
 {
@@ -166,11 +185,14 @@ class ProducerImplTests : public TestWithParam<ProducerType> {
     bsl::shared_ptr<rmqa::ProducerImpl::Factory> paramPicker(ProducerType pt)
     {
         switch (pt) {
-            case TRACING_PRODUCER:
-                return bsl::make_shared<rmqa::TracingProducerImpl::Factory>(
-                    bsl::make_shared<rmqt::SimpleEndpoint>("example-hostname",
-                                                           "example-vhost"),
-                    d_tracing);
+            case TRACING_PRODUCER: {
+                bsl::shared_ptr<rmqp::ProducerTagger> tagger(
+                    new rmqa::TracingTagger(
+                        bsl::make_shared<rmqt::SimpleEndpoint>(
+                            "example-hostname", "example-vhost"),
+                        d_tracing));
+                return bsl::make_shared<rmqa::ProducerImpl::Factory>(tagger);
+            }
             default:
                 return bsl::make_shared<rmqa::ProducerImpl::Factory>();
         }
@@ -243,6 +265,43 @@ TEST_P(ProducerImplTests, PublishNotMandatory)
                    d_timeout);
 
     d_threadPool.drain();
+}
+
+TEST_P(ProducerImplTests, SendDoesNotShareHeaderTableWithCaller)
+{
+    // send is asynchronous, so the message handed to the channel must not
+    // share a header table with the one the caller still owns
+
+    bsl::shared_ptr<rmqt::FieldTable> callerHeaders(
+        bsl::make_shared<rmqt::FieldTable>());
+    callerHeaders->insert(
+        bsl::make_pair(bsl::string("appheader"), bsl::string("before")));
+
+    rmqt::Message message(bsl::make_shared<bsl::vector<uint8_t> >(5));
+    message.properties().headers = callerHeaders;
+
+    EXPECT_CALL(*d_mockSendChannel, setCallback(_));
+    bsl::shared_ptr<rmqa::ProducerImpl> producer(d_factory->create(
+        1, d_exchange, d_mockSendChannel, d_threadPool, d_eventLoop));
+
+    rmqt::Message published;
+    EXPECT_CALL(*d_mockSendChannel,
+                publishMessage(_, bsl::string("routingKey"), _))
+        .WillOnce(SaveArg<0>(&published));
+
+    producer->send(message, "routingKey", d_callback, d_timeout);
+    d_threadPool.drain();
+
+    // the caller carries on using the table it owns, as it is entitled to
+    (*callerHeaders)["appheader"] = bsl::string("after");
+    callerHeaders->insert(
+        bsl::make_pair(bsl::string("extra"), bsl::string("value")));
+
+    ASSERT_TRUE(published.headers());
+    EXPECT_THAT(published.headers().get(), Ne(callerHeaders.get()));
+    EXPECT_THAT(published.headers()->size(), Eq(1u));
+    EXPECT_TRUE(published.headers()->find("appheader")->second ==
+                rmqt::FieldValue(bsl::string("before")));
 }
 
 TEST_P(ProducerImplTests, DuplicateMessagesReturnDuplicate)
@@ -823,7 +882,7 @@ TEST_P(ProducerImplMaxOutstandingTests, SendFromConfirmCallbackDoesNotDeadlock)
     d_threadPool.drain();
 }
 
-class TracingProducerImplTests : public ProducerImplMaxOutstandingTests {
+class TracingTaggerTests : public ProducerImplMaxOutstandingTests {
   public:
 };
 
@@ -832,7 +891,7 @@ MATCHER_P(MessagePropertiesMatch, expected, "")
     return arg.properties() == expected;
 }
 
-TEST_P(TracingProducerImplTests, SendConfirmCallsTracing)
+TEST_P(TracingTaggerTests, SendConfirmCallsTracing)
 {
     // GIVEN
     bsl::shared_ptr<MockProducerTracing::MockContext> tracingContext(
@@ -867,6 +926,87 @@ TEST_P(TracingProducerImplTests, SendConfirmCallsTracing)
     d_threadPool.drain();
 }
 
+TEST_P(TracingTaggerTests, SendWithMandatoryFlagConfirmCallsTracing)
+{
+    // Regression. Tracing used to be a ProducerImpl subclass overriding each
+    // send() separately, and this overload was missed, so publishing with an
+    // explicit mandatory flag silently bypassed tracing. The tagger is reached
+    // from one place now, but keep the coverage.
+
+    // GIVEN
+    bsl::shared_ptr<MockProducerTracing::MockContext> tracingContext(
+        bsl::make_shared<MockProducerTracing::MockContext>());
+    rmqt::Properties specialProperties = d_message.properties();
+    specialProperties.headers          = bsl::make_shared<rmqt::FieldTable>();
+    specialProperties.headers->insert(
+        bsl::make_pair(bsl::string("special"), bsl::string("property")));
+
+    bsl::shared_ptr<rmqa::ProducerImpl> producer(d_factory->create(
+        1, d_exchange, d_mockSendChannel, d_threadPool, d_eventLoop));
+
+    // The tagged message must be published, and the caller-supplied mandatory
+    // flag must be forwarded unchanged to the channel.
+    EXPECT_CALL(*d_mockSendChannel,
+                publishMessage(MessagePropertiesMatch(specialProperties),
+                               bsl::string("routingKey"),
+                               rmqt::Mandatory::DISCARD_UNROUTABLE));
+    EXPECT_CALL(
+        *d_tracing,
+        createAndTag(
+            _, bsl::string("routingKey"), bsl::string("test-exchange"), _))
+        .WillOnce(
+            DoAll(SetArgPointee<0>(specialProperties), Return(tracingContext)));
+    // WHEN
+    producer->send(d_message,
+                   "routingKey",
+                   rmqt::Mandatory::DISCARD_UNROUTABLE,
+                   d_callback,
+                   d_timeout);
+
+    const rmqt::ConfirmResponse confirmResponse(rmqt::ConfirmResponse::ACK);
+
+    EXPECT_CALL(*tracingContext, response(confirmResponse)).WillOnce(Return());
+
+    d_injectConfirm(d_message, d_exchange->name(), confirmResponse);
+
+    d_threadPool.drain();
+}
+
+TEST_P(TracingTaggerTests, TracingDoesNotMutateCallerHeaders)
+{
+    // tracing hooks inject into the headers in place, so they must be handed
+    // a table the library owns rather than the caller's
+
+    bsl::shared_ptr<rmqt::FieldTable> callerHeaders(
+        bsl::make_shared<rmqt::FieldTable>());
+    callerHeaders->insert(
+        bsl::make_pair(bsl::string("appheader"), bsl::string("value")));
+
+    rmqt::Message message(bsl::make_shared<bsl::vector<uint8_t> >(5));
+    message.properties().headers = callerHeaders;
+
+    bsl::shared_ptr<rmqa::ProducerImpl> producer(d_factory->create(
+        1, d_exchange, d_mockSendChannel, d_threadPool, d_eventLoop));
+
+    rmqt::Message published;
+    EXPECT_CALL(*d_mockSendChannel,
+                publishMessage(_, bsl::string("routingKey"), _))
+        .WillOnce(SaveArg<0>(&published));
+    // Invoke() is required, the gmock on some of our platforms has no
+    // implicit conversion from a function pointer to an Action
+    EXPECT_CALL(*d_tracing, createAndTag(_, _, _, _))
+        .WillOnce(Invoke(&tagWithHeader));
+
+    producer->send(message, "routingKey", d_callback, d_timeout);
+    d_threadPool.drain();
+
+    ASSERT_TRUE(published.headers());
+    EXPECT_THAT(published.headers()->count(k_INJECTED_KEY), Eq(1u));
+
+    EXPECT_THAT(callerHeaders->count(k_INJECTED_KEY), Eq(0u));
+    EXPECT_THAT(callerHeaders->size(), Eq(1u));
+}
+
 RMQTESTUTIL_TESTSUITE_P(AllMembers,
                         ProducerImplTests,
                         Values(PRODUCER, TRACING_PRODUCER),
@@ -889,6 +1029,6 @@ RMQTESTUTIL_TESTSUITE_P(AllMembers,
                         ProducerImplTests::PrintParamName());
 
 RMQTESTUTIL_TESTSUITE_P(AllMembers,
-                        TracingProducerImplTests,
+                        TracingTaggerTests,
                         Values(TRACING_PRODUCER),
                         ProducerImplTests::PrintParamName());

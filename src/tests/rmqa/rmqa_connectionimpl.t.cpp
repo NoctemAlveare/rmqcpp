@@ -17,7 +17,9 @@
 
 #include <rmqtestutil_mockchannel.t.h>
 #include <rmqtestutil_mockeventloop.t.h>
+#include <rmqtestutil_mockmetricpublisher.h>
 #include <rmqtestutil_mockresolver.t.h>
+#include <rmqtestutil_mocktimerfactory.h>
 
 #include <rmqa_topology.h>
 #include <rmqamqp_heartbeatmanagerimpl.h>
@@ -37,8 +39,6 @@
 #include <gtest/gtest.h>
 
 #include <bsl_iostream.h>
-#include <rmqtestutil_mockmetricpublisher.h>
-#include <rmqtestutil_mocktimerfactory.h>
 
 using namespace BloombergLP;
 using namespace rmqamqp;
@@ -73,6 +73,7 @@ class MockConnection : public rmqamqp::Connection {
                           endpoint,
                           credentials,
                           clientProperties,
+                          bsl::optional<bsls::TimeInterval>(),
                           "Connection Name")
     , d_ackQueue(bsl::make_shared<rmqt::ConsumerAckQueue>())
     , d_receiveChannel(
